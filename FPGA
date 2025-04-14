@@ -1,5 +1,3 @@
-bueno lo voy a grabar, aqui estan los codigos importantes:
-
 de10-Define la lógica principal que monitorea switches (SW), botones (KEY), y genera datos UART.
 
 Gestión de tx_data_de10 y tx_ena_de10 para enviar los comandos correctos a Unity.
