@@ -1,0 +1,202 @@
+bueno lo voy a grabar, aqui estan los codigos importantes:
+
+de10-Define la lógica principal que monitorea switches (SW), botones (KEY), y genera datos UART.
+
+Gestión de tx_data_de10 y tx_ena_de10 para enviar los comandos correctos a Unity.
+
+Comando 0x20, 0x22, 0x00, 0x02, etc. para avanzar, liberar marchas, frenar, etc.
+
+Debouncers o procesos que verifican flancos de activación.
+
+-- de10_lite.vhd
+
+LIBRARY ieee;
+USE ieee.std_logic_1164.all;
+
+ENTITY de10_lite IS
+    PORT(
+        CLOCK_50 : IN std_logic;
+        KEY      : IN std_logic_vector(1 DOWNTO 0);
+        SW       : IN std_logic_vector(9 DOWNTO 0);
+        GPIO_24  : IN std_logic;  -- RX
+        GPIO_25  : OUT std_logic; -- TX
+        LEDR     : OUT std_logic_vector(9 DOWNTO 0);
+        HEX0     : OUT std_logic_vector(6 DOWNTO 0)
+    );
+END;
+
+ARCHITECTURE Structural OF de10_lite IS
+
+  COMPONENT uart IS
+    GENERIC(
+      clk_freq  : integer := 50_000_000;
+      baud_rate : integer := 115_200;
+      os_rate   : integer := 16;
+      d_width   : integer := 8;
+      parity    : integer := 0;
+      parity_eo : std_logic := '0'
+    );
+    PORT(
+      clk      : IN std_logic;
+      reset_n  : IN std_logic;
+      tx_ena   : IN std_logic;
+      tx_data  : IN std_logic_vector(d_width-1 DOWNTO 0);
+      rx       : IN std_logic;
+      rx_busy  : OUT std_logic;
+      rx_error : OUT std_logic;
+      rx_data  : OUT std_logic_vector(d_width-1 DOWNTO 0);
+      tx_busy  : OUT std_logic;
+      tx       : OUT std_logic
+    );
+  END COMPONENT;
+
+  COMPONENT debounce IS
+    PORT(
+      Clock     : IN std_logic;
+      button    : IN std_logic;
+      debounced : BUFFER std_logic
+    );
+  END COMPONENT;
+
+  COMPONENT hex_display IS
+    PORT(
+      bin : IN std_logic_vector(3 DOWNTO 0);
+      seg : OUT std_logic_vector(6 DOWNTO 0)
+    );
+  END COMPONENT;
+
+  -- Señales internas
+  SIGNAL tx_ena_de10        : std_logic := '1';
+  SIGNAL tx_data_de10       : std_logic_vector(7 DOWNTO 0);
+  SIGNAL rx_busy_de10       : std_logic;
+  SIGNAL rx_error_de10      : std_logic;
+  SIGNAL rx_data_de10       : std_logic_vector(7 DOWNTO 0);
+  SIGNAL tx_busy_de10       : std_logic;
+  SIGNAL key1_db            : std_logic;
+  SIGNAL key1_db_past       : std_logic := '0';
+  SIGNAL key0_db            : std_logic;
+  SIGNAL sw_past            : std_logic_vector(3 DOWNTO 0) := (others => '0');
+  SIGNAL sw_now             : std_logic_vector(3 DOWNTO 0);
+  SIGNAL sw_comb_full       : std_logic_vector(3 DOWNTO 0);
+  SIGNAL cmd_actual         : std_logic_vector(7 DOWNTO 0) := (others => '0');
+  SIGNAL prev_tx_data_full  : std_logic_vector(7 DOWNTO 0) := (others => '0');
+  SIGNAL uart_val           : std_logic_vector(3 DOWNTO 0);
+  SIGNAL repeat_counter : integer range 0 to 5_000_000 := 0;
+  SIGNAL repeat_limit   : integer := 5_000_000; -- Reenviar comando cada 0.1s aprox
+  SIGNAL sw8_now    : std_logic := '0';
+  SIGNAL sw8_past   : std_logic := '0';
+  SIGNAL sw7_now : std_logic := '0';
+  SIGNAL sw7_past : std_logic := '0';
+  SIGNAL sw_all_zeros_now  : std_logic := '0';
+  SIGNAL sw_all_zeros_past : std_logic := '0';
+
+BEGIN
+
+  -- UART
+  uart_0 : uart
+    PORT MAP(
+      clk      => CLOCK_50,
+      reset_n  => KEY(0),
+      tx_ena   => tx_ena_de10,
+      tx_data  => tx_data_de10,
+      rx       => GPIO_24,
+      rx_busy  => rx_busy_de10,
+      rx_error => rx_error_de10,
+      rx_data  => rx_data_de10,
+      tx_busy  => tx_busy_de10,
+      tx       => GPIO_25
+    );
+
+  -- Debounce botones KEY(0) y KEY(1)
+  button_0 : debounce PORT MAP(CLOCK_50, KEY(1), key1_db);
+  button_1 : debounce PORT MAP(CLOCK_50, KEY(0), key0_db);
+
+  -- Mostrar en LEDR los datos recibidos por UART (opcional)
+  --LEDR(7 downto 0) <= tx_data_de10;
+
+  -- Mostrar el valor UART en HEX0 (últimos 4 bits)
+  uart_val <= rx_data_de10(3 DOWNTO 0);
+  hex_display_inst0: entity work.hex_display PORT MAP(bin => uart_val, seg => HEX0);
+
+   -- Proceso principal SIN freno
+	-- Proceso principal
+PROCESS(CLOCK_50)
+BEGIN
+    IF rising_edge(CLOCK_50) THEN
+    -- Captura de switches actuales
+    sw_now(3) <= SW(3);
+    sw_now(2) <= SW(2);
+    sw_now(1) <= SW(1);
+    sw_now(0) <= SW(0);
+    sw8_now   <= SW(8);
+	 sw7_now <= SW(7);
+
+    -- Verifica si todos los switches están en 0000 (forma válida)
+    IF sw_now = "0000" THEN
+      sw_all_zeros_now <= '1';
+    ELSE
+      sw_all_zeros_now <= '0';
+    END IF;
+
+    -- 1. Flanco de bajada de SW8: liberar cambio de marcha
+    IF sw8_now = '1' AND sw8_past = '0' THEN
+		  tx_data_de10 <= x"20"; -- Subir marcha
+		  tx_ena_de10 <= '0';
+		  repeat_counter <= 0;
+		
+	-- 2. Flanco de bajada de SW8: liberar cambio
+	ELSIF sw7_now = '1' AND sw7_past = '0' THEN
+  tx_data_de10 <= x"22"; -- Liberar cambio
+  tx_ena_de10 <= '0';
+  repeat_counter <= 0;
+
+    -- 2. Flanco de bajada de todos los SW: detener (una vez)
+    ELSIF sw_all_zeros_now = '1' AND sw_all_zeros_past = '0' THEN
+      tx_data_de10 <= x"00"; -- Comando: detener
+      tx_ena_de10 <= '0';
+      repeat_counter <= 0;
+
+    -- 3. Freno total (KEY1 presionado)
+    ELSIF key1_db = '0' AND key1_db_past = '1' THEN
+      tx_data_de10 <= x"04"; -- Freno total
+      tx_ena_de10 <= '0';
+      repeat_counter <= 0;
+
+    -- 4. Cambio en switches (nuevo estado)
+    ELSIF sw_now /= sw_past THEN
+      repeat_counter <= 0;
+      CASE sw_now IS
+        WHEN "0100" => tx_data_de10 <= "00000010";
+        WHEN "0010" => tx_data_de10 <= "00000011";
+        WHEN "1000" => tx_data_de10 <= "00001000";
+        WHEN "0001" => tx_data_de10 <= "00001010";
+        WHEN "1100" => tx_data_de10 <= "00001100";
+        WHEN "0101" => tx_data_de10 <= "00001101";
+        WHEN "1010" => tx_data_de10 <= "00001110";
+        WHEN "0011" => tx_data_de10 <= "00001111";
+        WHEN OTHERS => tx_data_de10 <= "00000000";
+      END CASE;
+      tx_ena_de10 <= '0';
+
+    -- 5. Reenvío periódico si el estado no ha cambiado
+    ELSIF sw_now = sw_past THEN
+      IF repeat_counter >= repeat_limit THEN
+        tx_ena_de10 <= '0';
+        repeat_counter <= 0;
+      ELSE
+        tx_ena_de10 <= '1';
+        repeat_counter <= repeat_counter + 1;
+      END IF;
+    END IF;
+
+    -- Actualización de estados pasados
+    key1_db_past <= key1_db;
+    sw_past <= sw_now;
+    sw8_past <= sw8_now;
+	 sw7_past <= sw7_now;
+    sw_all_zeros_past <= sw_all_zeros_now;
+  END IF;
+END PROCESS;
+
+
+END Structural;
