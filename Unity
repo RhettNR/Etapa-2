@@ -1,0 +1,155 @@
+UIController.cs: recibe comandos desde el FPGA y activa acciones como avanzar, girar, frenar.
+
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using System.IO.Ports;
+
+public class UIController : MonoBehaviour
+{
+    private SerialPort serialPort;
+    private PlayerMove playerMove;
+    private bool ignorarSiguienteCero = false;
+    private bool ignorarSiguienteFreno = false;
+    private bool sw8Held = false;
+    private bool uartListo = false;
+
+    void Start()
+{
+    StartCoroutine(EsperarYConectarUART());
+}
+
+    IEnumerator EsperarYConectarUART()
+{
+    yield return new WaitUntil(() =>
+        SerialSender.instance != null &&
+        SerialSender.instance.GetSerialPort()?.IsOpen == true &&
+        FindObjectOfType<PlayerMove>() != null);
+
+    serialPort = SerialSender.instance.GetSerialPort();
+    playerMove = FindObjectOfType<PlayerMove>();
+    uartListo = true;
+
+    Debug.Log("✅ UART conectado correctamente desde UIController.");
+}
+
+    void Update()
+    {
+        if (playerMove == null)
+    {
+        Debug.LogWarning("⚠️ playerMove no está asignado.");
+    }
+
+    if (!uartListo || serialPort == null || !serialPort.IsOpen)
+        return;
+        try
+        {
+            if (serialPort.BytesToRead > 0)
+            {
+                int data = serialPort.ReadByte();
+
+                playerMove.DetenerGiroUART(); // Siempre primero
+
+                switch (data)
+                {
+                    case 0x02:
+                        Debug.Log("🚜 Comando recibido: avanzar");
+                        playerMove.AvanzarDesdeUART();
+                        break;
+                    case 0x04:
+                        if (ignorarSiguienteFreno)
+                        {
+                            Debug.Log("⚠️ Ignorando 0x04 justo después de 0x20 (subida de marcha)");
+                            ignorarSiguienteFreno = false;
+                            break;
+                        }
+                        Debug.Log("🛑 Comando recibido: detener avance");
+                        playerMove.DetenerDesdeUART();
+                        break;
+                    case 0x03:
+                        Debug.Log("🔄 Comando recibido: reversa");
+                        playerMove.RetrocederDesdeUART();
+                        break;
+                    case 0x05:
+                        Debug.Log("⛔ Comando recibido: detener reversa");
+                        playerMove.DetenerReversaDesdeUART();
+                        break;
+                    case 0x06:
+                        Debug.Log("⚠️ Conflicto: avance y reversa activos");
+                        playerMove.DetenerDesdeUART();
+                        playerMove.DetenerReversaDesdeUART();
+                        playerMove.DetenerGiroUART();
+                        break;
+                    case 0x14:
+                        Debug.Log("⚠️ Conflicto + giro");
+                        playerMove.DetenerDesdeUART();
+                        playerMove.DetenerReversaDesdeUART();
+                        break;
+                    case 0x08:
+                        Debug.Log("⬅️ Izquierda");
+                        playerMove.GirarIzquierdaUART();
+                        break;
+                    case 0x0A:
+                        Debug.Log("➡️ Derecha");
+                        playerMove.GirarDerechaUART();
+                        break;
+                    case 0x0C:
+                        Debug.Log("🚜⬅️ Avanzar + izquierda");
+                        playerMove.AvanzarDesdeUART();
+                        playerMove.GirarIzquierdaUART();
+                        break;
+                    case 0x0D:
+                        Debug.Log("🚜➡️ Avanzar + derecha");
+                        playerMove.AvanzarDesdeUART();
+                        playerMove.GirarDerechaUART();
+                        break;
+                    case 0x0E:
+                        Debug.Log("🔄⬅️ Reversa + izquierda");
+                        playerMove.RetrocederDesdeUART();
+                        playerMove.GirarIzquierdaUART();
+                        break;
+                    case 0x0F:
+                        Debug.Log("🔄➡️ Reversa + derecha");
+                        playerMove.RetrocederDesdeUART();
+                        playerMove.GirarDerechaUART();
+                        break;
+                    case 0x20:
+                        if (!sw8Held)
+                        {
+                            Debug.Log("⚡ Cambio de velocidad UART recibido (simula Q) — NUEVO CAMBIO");
+                            playerMove.AumentarVelocidadDesdeUART();
+                            sw8Held = true;
+                        }
+                        else
+                        {
+                            Debug.Log("⚡ Cambio de velocidad UART recibido (simula Q) — ignorado por estar mantenido");
+                        }
+                        break;
+                    case 0x00:
+                        Debug.Log("🛑 Comando 0x00 — detener el tractor (por SW2, freno, etc)");
+                        playerMove.DetenerDesdeUART();
+                        playerMove.DetenerReversaDesdeUART();
+                        playerMove.DetenerTodoDesdeUART();
+                        break;
+                    case 0x21:
+                        Debug.Log("🛑 Freno total activado");
+                        playerMove.DetenerDesdeUART();
+                        playerMove.DetenerReversaDesdeUART();
+                        playerMove.DetenerGiroUART();
+                        break;
+                    case 0x22:
+                        sw8Held = false;
+                        Debug.Log("🔄 SW8 liberado — cambio permitido nuevamente");
+                        break;
+                    default:
+                        Debug.LogWarning("⚠️ Comando UART no reconocido: " + data.ToString("X2"));
+                        break;
+                }
+            }
+        }
+        catch (System.TimeoutException)
+        {
+            // Ignorar timeout
+        }
+    }
+}
